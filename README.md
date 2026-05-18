@@ -79,4 +79,4 @@ script/generate_app_icon.swift
 
 ## License
 
-No license has been specified yet.
+Study Tracker is released under the MIT License. See [LICENSE](LICENSE).
