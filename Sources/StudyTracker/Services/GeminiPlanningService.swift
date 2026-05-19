@@ -62,6 +62,8 @@ struct GeminiPlanningService {
                             You are a planning assistant inside a macOS study tracker.
                             Create a small, non-overwhelming plan. Prefer 3-10 practical actions.
                             Do not rename or delete files. Do not claim work is complete.
+                            If the user asks about a file type, use the file type counts and matching file list in context.
+                            If matching files exist, do not say that no matching files were found.
                             Use the user's prompt and project context.
 
                             User prompt:
@@ -127,7 +129,7 @@ struct AIPlanningContext {
 
     var promptText: String {
         let fileLines = files.prefix(80).map { item in
-            "- \(item.relativePath) | \(item.kind.label) | completed: \(item.progress.isCompleted)"
+            "- \(item.relativePath) | \(item.kind.label) | .\(item.fileExtension) | completed: \(item.progress.isCompleted)"
         }.joined(separator: "\n")
         let todoLines = todos.prefix(40).map { todo in
             "- \(todo.title) | completed: \(todo.isCompleted)"

@@ -744,10 +744,11 @@ final class ProgressStore: ObservableObject {
             }
             isGeneratingAIPlan = true
             defer { isGeneratingAIPlan = false }
+            let contextFiles = aiContextFiles(for: prompt)
             let context = AIPlanningContext(
                 projectName: library.name,
-                projectSummary: "\(completedCount) of \(totalCount) files complete. \(sections.count) sections. \(selectedTodos.count) todos.",
-                files: filteredItems.isEmpty ? items : filteredItems,
+                projectSummary: "\(completedCount) of \(totalCount) files complete. \(sections.count) sections. \(selectedTodos.count) todos. \(aiKindSummary).",
+                files: contextFiles,
                 todos: selectedTodos
             )
             let draft = try await GeminiPlanningService(apiKey: apiKey, model: geminiModel).generatePlan(prompt: prompt, context: context)
@@ -1056,6 +1057,46 @@ final class ProgressStore: ObservableObject {
 
     private func aiNote(sectionPath: String) -> String {
         "AI-created item in \(sectionPath)."
+    }
+
+    private var aiKindSummary: String {
+        let counts = Dictionary(grouping: items, by: \.kind).mapValues(\.count)
+        return FileKind.allCases
+            .compactMap { kind in
+                guard let count = counts[kind], count > 0 else { return nil }
+                return "\(count) \(kind.label)"
+            }
+            .joined(separator: ", ")
+    }
+
+    private func aiContextFiles(for prompt: String) -> [TrackableItem] {
+        let source = filteredItems.isEmpty ? items : filteredItems
+        let query = prompt.localizedLowercase
+        let requestedKinds = FileKind.allCases.filter { kind in
+            query.contains(kind.rawValue) || query.contains(kind.label.localizedLowercase)
+        }
+        let extensionHits = Set(["pdf", "md", "pptx", "docx", "xlsx"].filter { query.contains($0) })
+
+        let relevant = source.filter { item in
+            requestedKinds.contains(item.kind)
+                || extensionHits.contains(item.fileExtension)
+                || query.split(separator: " ").contains { word in
+                    word.count > 2 && item.relativePath.localizedLowercase.contains(word)
+                }
+        }
+
+        let incomplete = source.filter { !$0.progress.isCompleted }
+        var result: [TrackableItem] = []
+        result.append(contentsOf: relevant)
+        result.append(contentsOf: incomplete.prefix(80))
+        result.append(contentsOf: source.prefix(80))
+
+        var seen = Set<String>()
+        return result.filter { item in
+            seen.insert(item.relativePath).inserted
+        }
+        .prefix(160)
+        .map { $0 }
     }
 
     private var storageURL: URL {
