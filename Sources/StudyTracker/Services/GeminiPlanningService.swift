@@ -5,6 +5,11 @@ struct GeminiPlanningService {
     var model: String
 
     func generatePlan(prompt: String, context: AIPlanningContext) async throws -> AIPlanDraft {
+        let command = try await generateCommand(prompt: prompt, context: context)
+        return AIPlanDraft(summary: command.assistantMessage, warnings: command.warnings, actions: command.actions)
+    }
+
+    func generateCommand(prompt: String, context: AIPlanningContext) async throws -> AICommandDraft {
         let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(model):generateContent")!
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -29,7 +34,7 @@ struct GeminiPlanningService {
         }
 
         let draftData = Data(text.utf8)
-        let draft = try JSONDecoder().decode(AIPlanDraft.self, from: draftData)
+        let draft = try JSONDecoder().decode(AICommandDraft.self, from: draftData)
         return validate(draft)
     }
 
@@ -38,7 +43,7 @@ struct GeminiPlanningService {
         _ = try await generatePlan(prompt: "Return one low priority todo saying connection test.", context: context)
     }
 
-    private func validate(_ draft: AIPlanDraft) -> AIPlanDraft {
+    private func validate(_ draft: AICommandDraft) -> AICommandDraft {
         let actions = draft.actions
             .filter { $0.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false }
             .prefix(40)
@@ -47,9 +52,12 @@ struct GeminiPlanningService {
                 if updated.estimatedMinutes != nil {
                     updated.estimatedMinutes = min(max(updated.estimatedMinutes ?? 0, 5), 240)
                 }
+                if updated.risk == .destructive {
+                    updated.requiresConfirmation = true
+                }
                 return updated
             }
-        return AIPlanDraft(summary: draft.summary, warnings: draft.warnings, actions: Array(actions))
+        return AICommandDraft(assistantMessage: draft.assistantMessage, warnings: draft.warnings, actions: Array(actions))
     }
 
     private func requestBody(prompt: String, context: AIPlanningContext) -> [String: Any] {
@@ -60,8 +68,14 @@ struct GeminiPlanningService {
                         [
                             "text": """
                             You are a planning assistant inside a macOS study tracker.
-                            Create a small, non-overwhelming plan. Prefer 3-10 practical actions.
-                            Do not rename or delete files. Do not claim work is complete.
+                            Respond conversationally and, when useful, include 0-10 structured app actions.
+                            Keep plans small and non-overwhelming. Prefer 3-8 practical actions.
+                            You can control tracker metadata and view state, but never delete, rename, or move files on disk.
+                            For destructive tracker changes like resetProgress, set risk to destructive and requiresConfirmation to true.
+                            For view-only answers, summaries, recommendations, selecting, filtering, grouping, and sorting, use risk viewOnly.
+                            For creating or editing projects, lists, items, todos, notes, completion, and favorites, use risk update.
+                            Use createMarkdownNote only when the user explicitly asks to create a Markdown note.
+                            Use targetPath for file/list actions when a specific file/list path is present in context.
                             If the user asks about a file type, use the file type counts and matching file list in context.
                             If matching files exist, do not say that no matching files were found.
                             Use the user's prompt and project context.
@@ -88,7 +102,7 @@ struct GeminiPlanningService {
         [
             "type": "object",
             "properties": [
-                "summary": ["type": "string"],
+                "assistantMessage": ["type": "string"],
                 "warnings": [
                     "type": "array",
                     "items": ["type": "string"]
@@ -110,14 +124,58 @@ struct GeminiPlanningService {
                             "priority": [
                                 "type": "string",
                                 "enum": AIPriority.allCases.map(\.rawValue)
+                            ],
+                            "targetID": ["type": "string"],
+                            "targetPath": ["type": "string"],
+                            "value": ["type": "string"],
+                            "kind": [
+                                "type": "string",
+                                "enum": FileKind.allCases.map(\.rawValue)
+                            ],
+                            "sortOption": [
+                                "type": "string",
+                                "enum": SortOption.allCases.map(\.rawValue)
+                            ],
+                            "groupOption": [
+                                "type": "string",
+                                "enum": GroupOption.allCases.map(\.rawValue)
+                            ],
+                            "smartView": [
+                                "type": "string",
+                                "enum": SmartView.allCases.map(\.rawValue)
+                            ],
+                            "completed": ["type": "boolean"],
+                            "favorite": ["type": "boolean"],
+                            "requiresConfirmation": ["type": "boolean"],
+                            "risk": [
+                                "type": "string",
+                                "enum": AIActionRisk.allCases.map(\.rawValue)
                             ]
                         ],
-                        "required": ["actionType", "title", "priority"]
+                        "required": ["actionType", "title", "priority", "requiresConfirmation", "risk"]
                     ]
                 ]
             ],
-            "required": ["summary", "warnings", "actions"]
+            "required": ["assistantMessage", "warnings", "actions"]
         ]
+    }
+}
+
+struct GeminiChatService {
+    var apiKey: String
+    var model: String
+
+    func send(prompt: String, context: AIPlanningContext) async throws -> AICommandDraft {
+        try await GeminiPlanningService(apiKey: apiKey, model: model).generateCommand(prompt: prompt, context: context)
+    }
+}
+
+struct GeminiCommandService {
+    var apiKey: String
+    var model: String
+
+    func draftActions(prompt: String, context: AIPlanningContext) async throws -> AICommandDraft {
+        try await GeminiPlanningService(apiKey: apiKey, model: model).generateCommand(prompt: prompt, context: context)
     }
 }
 

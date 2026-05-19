@@ -12,7 +12,6 @@ struct DetailView: View {
                 ControlsBarView()
                 Divider()
                 ScrollView {
-                    AIAssistantView()
                     TodoPanelView()
                     SectionListView()
                 }

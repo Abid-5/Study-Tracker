@@ -55,6 +55,12 @@ struct SettingsView: View {
                     Text("Gemini 2.0 Flash").tag("gemini-2.0-flash")
                 }
 
+                Picker("AI mode", selection: $store.aiControlMode) {
+                    ForEach(AIControlMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+
                 Text(store.hasGeminiAPIKey ? "Gemini API key is stored in macOS Keychain." : "Add your Gemini API key to enable the AI Assistant.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -90,6 +96,9 @@ struct SettingsView: View {
             store.save()
         }
         .onChange(of: store.geminiModel) { _, _ in
+            store.save()
+        }
+        .onChange(of: store.aiControlMode) { _, _ in
             store.save()
         }
     }

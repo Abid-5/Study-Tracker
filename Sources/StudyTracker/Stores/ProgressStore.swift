@@ -19,9 +19,12 @@ final class ProgressStore: ObservableObject {
     @Published var hasGeminiAPIKey = false
     @Published var isGeneratingAIPlan = false
     @Published var aiPrompt = ""
+    @Published var aiChatInput = ""
     @Published var aiDraft: AIPlanDraft?
+    @Published var activeAICommandDraft: AICommandDraft?
     @Published var selectedAIActionIDs: Set<UUID> = []
     @Published var aiStatusMessage: String?
+    @Published var aiControlMode: AIControlMode = .guarded
     @Published var isScanning = false
     @Published var expandedSections: Set<String> = []
     @Published var isBatchSelecting = false
@@ -33,6 +36,9 @@ final class ProgressStore: ObservableObject {
     private var todosByLibraryID: [UUID: [ProjectTodo]] = [:]
     private var hiddenItemPathsByLibraryID: [UUID: Set<String>] = [:]
     private var hiddenSectionPathsByLibraryID: [UUID: Set<String>] = [:]
+    private var aiConversationsByLibraryID: [UUID: AIConversation] = [:]
+    private var aiActionResultsByLibraryID: [UUID: [AIActionResult]] = [:]
+    private var aiUndoSnapshotsByLibraryID: [UUID: AIUndoSnapshot] = [:]
     private let scanner = FileScanner()
 
     var selectedLibrary: Library? {
@@ -158,6 +164,17 @@ final class ProgressStore: ObservableObject {
         items.filter { selectedItemIDs.contains($0.id) }
     }
 
+    var selectedAIConversation: AIConversation? {
+        guard let libraryID = selectedLibrary?.id else { return nil }
+        return aiConversationsByLibraryID[libraryID]
+    }
+
+    var selectedAIActionResults: [AIActionResult] {
+        guard let libraryID = selectedLibrary?.id else { return [] }
+        return aiActionResultsByLibraryID[libraryID, default: []]
+            .sorted { $0.createdAt > $1.createdAt }
+    }
+
     var visibleItemIDs: Set<String> {
         Set(filteredItems.map(\.id))
     }
@@ -179,11 +196,15 @@ final class ProgressStore: ObservableObject {
         todosByLibraryID = appData.todosByLibraryID
         hiddenItemPathsByLibraryID = appData.hiddenItemPathsByLibraryID
         hiddenSectionPathsByLibraryID = appData.hiddenSectionPathsByLibraryID
+        aiConversationsByLibraryID = appData.aiConversationsByLibraryID
+        aiActionResultsByLibraryID = appData.aiActionResultsByLibraryID
+        aiUndoSnapshotsByLibraryID = appData.aiUndoSnapshotsByLibraryID
         selectedLibraryID = appData.selectedLibraryID ?? libraries.first?.id
         includeHiddenFiles = appData.includeHiddenFiles
         markCompleteWhenOpened = appData.markCompleteWhenOpened
         preferredEditor = appData.preferredEditor
         geminiModel = appData.geminiModel
+        aiControlMode = appData.aiControlMode
         refreshGeminiKeyStatus()
         Task { await rescanSelectedLibrary() }
     }
@@ -197,11 +218,15 @@ final class ProgressStore: ObservableObject {
             todosByLibraryID: todosByLibraryID,
             hiddenItemPathsByLibraryID: hiddenItemPathsByLibraryID,
             hiddenSectionPathsByLibraryID: hiddenSectionPathsByLibraryID,
+            aiConversationsByLibraryID: aiConversationsByLibraryID,
+            aiActionResultsByLibraryID: aiActionResultsByLibraryID,
+            aiUndoSnapshotsByLibraryID: aiUndoSnapshotsByLibraryID,
             selectedLibraryID: selectedLibraryID,
             includeHiddenFiles: includeHiddenFiles,
             markCompleteWhenOpened: markCompleteWhenOpened,
             preferredEditor: preferredEditor,
-            geminiModel: geminiModel
+            geminiModel: geminiModel,
+            aiControlMode: aiControlMode
         )
         try? FileManager.default.createDirectory(at: storageURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         if let data = try? JSONEncoder.studyTracker.encode(appData) {
@@ -278,6 +303,17 @@ final class ProgressStore: ObservableObject {
         save()
     }
 
+    func renameSelectedProject(to name: String) {
+        guard let library = selectedLibrary,
+              let index = libraries.firstIndex(where: { $0.id == library.id }) else {
+            return
+        }
+        let resolved = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard resolved.isEmpty == false else { return }
+        libraries[index].name = resolved
+        save()
+    }
+
     func removeSelectedProject() {
         guard let library = selectedLibrary else { return }
         let alert = NSAlert()
@@ -295,6 +331,9 @@ final class ProgressStore: ObservableObject {
         todosByLibraryID[library.id] = nil
         hiddenItemPathsByLibraryID[library.id] = nil
         hiddenSectionPathsByLibraryID[library.id] = nil
+        aiConversationsByLibraryID[library.id] = nil
+        aiActionResultsByLibraryID[library.id] = nil
+        aiUndoSnapshotsByLibraryID[library.id] = nil
         selectedLibraryID = libraries.first?.id
         items = []
         save()
@@ -352,6 +391,28 @@ final class ProgressStore: ObservableObject {
         manualListsByLibraryID[libraryID, default: []].append(path)
         hiddenSectionPathsByLibraryID[libraryID, default: []].remove(path)
         expandedSections.insert(path)
+        save()
+        Task { await rescanSelectedLibrary() }
+    }
+
+    func renameList(path: String, to name: String) {
+        guard let libraryID = selectedLibrary?.id else { return }
+        let newPath = sanitizedPathComponent(name)
+        guard newPath.isEmpty == false, newPath != path else { return }
+        manualListsByLibraryID[libraryID, default: []] = manualListsByLibraryID[libraryID, default: []].map {
+            $0 == path ? newPath : $0
+        }
+        manualItemsByLibraryID[libraryID, default: []] = manualItemsByLibraryID[libraryID, default: []].map { item in
+            guard folderPath(for: item) == path else { return item }
+            var updated = item
+            let leaf = NSString(string: item.relativePath).lastPathComponent
+            updated.relativePath = "\(newPath)/\(leaf)"
+            updated.title = updated.title
+            return updated
+        }
+        if expandedSections.remove(path) != nil {
+            expandedSections.insert(newPath)
+        }
         save()
         Task { await rescanSelectedLibrary() }
     }
@@ -440,6 +501,30 @@ final class ProgressStore: ObservableObject {
         Task { await rescanSelectedLibrary() }
     }
 
+    func renameItem(relativePath: String, to title: String) {
+        guard let libraryID = selectedLibrary?.id else { return }
+        let resolved = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard resolved.isEmpty == false else { return }
+        manualItemsByLibraryID[libraryID, default: []] = manualItemsByLibraryID[libraryID, default: []].map { item in
+            guard item.relativePath == relativePath else { return item }
+            var updated = item
+            updated.title = resolved
+            return updated
+        }
+        items = items.map { item in
+            guard item.relativePath == relativePath else { return item }
+            var updated = item
+            updated.title = resolved
+            return updated
+        }
+        save()
+    }
+
+    func editItemNote(relativePath: String, note: String) {
+        guard let item = items.first(where: { $0.relativePath == relativePath || $0.id == relativePath }) else { return }
+        updateNote(note, for: item)
+    }
+
     func createMarkdownFile(in section: StudySection? = nil) {
         guard let library = selectedLibrary,
               let title = requestText(title: "New Markdown File", message: "Create a markdown note and open it in your preferred editor.", placeholder: "File title") else {
@@ -462,6 +547,27 @@ final class ProgressStore: ObservableObject {
         } catch {
             showError(title: "Could Not Create Markdown File", message: error.localizedDescription)
         }
+    }
+
+    func createMarkdownFile(title: String, sectionPath: String?, body: String?) throws {
+        guard let library = selectedLibrary else { return }
+        let resolvedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard resolvedTitle.isEmpty == false else { return }
+        let section = sectionPath.flatMap { path in
+            StudySection(title: path, path: path, items: [])
+        }
+        if library.isManual {
+            addItem(title: resolvedTitle, sectionPath: sectionPath)
+            editItemNote(relativePath: manualItemsByLibraryID[library.id, default: []].last?.relativePath ?? "", note: body ?? "AI-created Markdown note.")
+            return
+        }
+        let fileURL = try markdownFileURL(for: library, section: section, title: resolvedTitle)
+        let template = "# \(resolvedTitle)\n\n\((body ?? "").trimmingCharacters(in: .whitespacesAndNewlines))\n"
+        try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try template.write(to: fileURL, atomically: true, encoding: .utf8)
+
+        save()
+        Task { await rescanSelectedLibrary() }
     }
 
     func removeItem(_ item: TrackableItem) {
@@ -585,6 +691,33 @@ final class ProgressStore: ObservableObject {
             var updated = existing
             updated.isCompleted.toggle()
             updated.completedAt = updated.isCompleted ? Date() : nil
+            return updated
+        }
+        save()
+    }
+
+    func editTodo(id: UUID?, matching title: String?, newTitle: String) {
+        guard let libraryID = selectedLibrary?.id else { return }
+        let resolved = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard resolved.isEmpty == false else { return }
+        todosByLibraryID[libraryID] = todosByLibraryID[libraryID, default: []].map { existing in
+            let matchesID = id.map { $0 == existing.id } ?? false
+            let matchesTitle = title.map { existing.title.localizedCaseInsensitiveContains($0) } ?? false
+            guard matchesID || matchesTitle else { return existing }
+            var updated = existing
+            updated.title = resolved
+            return updated
+        }
+        save()
+    }
+
+    func setTodoCompletion(matching title: String, completed: Bool) {
+        guard let libraryID = selectedLibrary?.id else { return }
+        todosByLibraryID[libraryID] = todosByLibraryID[libraryID, default: []].map { existing in
+            guard existing.title.localizedCaseInsensitiveContains(title) else { return existing }
+            var updated = existing
+            updated.isCompleted = completed
+            updated.completedAt = completed ? Date() : nil
             return updated
         }
         save()
@@ -760,6 +893,64 @@ final class ProgressStore: ObservableObject {
         }
     }
 
+    func sendAIChatMessage(_ text: String? = nil) async {
+        guard let library = selectedLibrary else { return }
+        let prompt = (text ?? aiChatInput).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard prompt.isEmpty == false else { return }
+        appendAIMessage(AIChatMessage(role: .user, text: prompt))
+        aiChatInput = ""
+
+        do {
+            guard let apiKey = try KeychainService.geminiAPIKey(), apiKey.isEmpty == false else {
+                appendAIMessage(AIChatMessage(role: .system, text: "Add a Gemini API key in Settings to use AI chat."))
+                aiStatusMessage = "Add a Gemini API key in Settings first."
+                return
+            }
+
+            isGeneratingAIPlan = true
+            defer { isGeneratingAIPlan = false }
+            let context = AIPlanningContext(
+                projectName: library.name,
+                projectSummary: aiAppContextSummary(for: prompt),
+                files: aiContextFiles(for: prompt),
+                todos: selectedTodos
+            )
+            let draft = try await GeminiChatService(apiKey: apiKey, model: geminiModel).send(prompt: prompt, context: context)
+            activeAICommandDraft = draft
+            aiDraft = AIPlanDraft(summary: draft.assistantMessage, warnings: draft.warnings, actions: draft.actions)
+            selectedAIActionIDs = Set(draft.actions.filter { $0.risk == .update }.map(\.id))
+            appendAIMessage(AIChatMessage(role: .assistant, text: draft.assistantMessage, draft: draft))
+
+            if aiControlMode == .guarded {
+                applyViewOnlyActions(from: draft)
+            }
+            save()
+            aiStatusMessage = draft.actions.isEmpty ? "Gemini replied." : "Review Gemini's actions before applying them."
+        } catch {
+            appendAIMessage(AIChatMessage(role: .system, text: error.localizedDescription))
+            aiStatusMessage = error.localizedDescription
+        }
+    }
+
+    func runAIQuickCommand(_ command: String) {
+        Task { await sendAIChatMessage(command) }
+    }
+
+    func clearAIChatDraft() {
+        activeAICommandDraft = nil
+        aiDraft = nil
+        selectedAIActionIDs.removeAll()
+    }
+
+    func clearAIConversation() {
+        guard let libraryID = selectedLibrary?.id else { return }
+        aiConversationsByLibraryID[libraryID] = AIConversation(libraryID: libraryID)
+        activeAICommandDraft = nil
+        aiDraft = nil
+        selectedAIActionIDs.removeAll()
+        save()
+    }
+
     func toggleAIActionSelection(_ action: AIActionDraft) {
         if selectedAIActionIDs.contains(action.id) {
             selectedAIActionIDs.remove(action.id)
@@ -769,12 +960,47 @@ final class ProgressStore: ObservableObject {
     }
 
     func applySelectedAIActions() {
-        guard let draft = aiDraft else { return }
-        let selectedActions = draft.actions.filter { selectedAIActionIDs.contains($0.id) }
-        selectedActions.forEach(applyAIAction)
+        let actions = activeAICommandDraft?.actions ?? aiDraft?.actions ?? []
+        let selectedActions = actions.filter { selectedAIActionIDs.contains($0.id) }
+        guard selectedActions.isEmpty == false, let libraryID = selectedLibrary?.id else { return }
+
+        let destructiveActions = selectedActions.filter { $0.risk == .destructive || $0.requiresConfirmation }
+        if destructiveActions.isEmpty == false {
+            let alert = NSAlert()
+            alert.messageText = "Apply \(destructiveActions.count) confirmed AI action\(destructiveActions.count == 1 ? "" : "s")?"
+            alert.informativeText = "These actions can reset, restore, or otherwise significantly change tracker state. Files on disk are not deleted or renamed."
+            alert.alertStyle = .critical
+            alert.addButton(withTitle: "Apply")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+
+        let batchID = UUID()
+        aiUndoSnapshotsByLibraryID[libraryID] = undoSnapshot(for: libraryID)
+        let results = selectedActions.map { action in
+            applyAIAction(action, batchID: batchID)
+        }
+        aiActionResultsByLibraryID[libraryID, default: []].append(contentsOf: results)
         aiStatusMessage = "Applied \(selectedActions.count) selected AI actions."
+        appendAIMessage(AIChatMessage(role: .system, text: "Applied \(selectedActions.count) selected AI action\(selectedActions.count == 1 ? "" : "s")."))
+        activeAICommandDraft = nil
         aiDraft = nil
         selectedAIActionIDs.removeAll()
+        save()
+    }
+
+    func undoLastAIBatch() {
+        guard let libraryID = selectedLibrary?.id,
+              let snapshot = aiUndoSnapshotsByLibraryID[libraryID] else {
+            aiStatusMessage = "No AI changes to undo."
+            return
+        }
+        restoreUndoSnapshot(snapshot, libraryID: libraryID)
+        aiUndoSnapshotsByLibraryID[libraryID] = nil
+        aiStatusMessage = "Undid the last AI action batch."
+        appendAIMessage(AIChatMessage(role: .system, text: "Undid the last AI action batch."))
+        save()
+        Task { await rescanSelectedLibrary() }
     }
 
     private func updateProgress(for item: TrackableItem, mutate: (inout ItemProgress) -> Void) {
@@ -1030,7 +1256,8 @@ final class ProgressStore: ObservableObject {
         value.replacingOccurrences(of: "/", with: "-").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func applyAIAction(_ action: AIActionDraft) {
+    private func applyAIAction(_ action: AIActionDraft, batchID: UUID) -> AIActionResult {
+        var message = "No matching target."
         switch action.actionType {
         case .createProject:
             let library = Library(
@@ -1046,13 +1273,213 @@ final class ProgressStore: ObservableObject {
             selectedLibraryID = library.id
             items = []
             save()
+            message = "Created project \(action.title)."
         case .createList:
             addList(named: action.title)
+            message = "Created list \(action.title)."
         case .createItem:
             addItem(title: action.title, sectionPath: action.sectionTitle)
+            message = "Created item \(action.title)."
         case .createTodo:
             addTodo(title: action.title, detail: action.detail)
+            message = "Created todo \(action.title)."
+        case .renameProject:
+            renameSelectedProject(to: action.value ?? action.title)
+            message = "Renamed project."
+        case .renameList:
+            if let path = action.targetPath ?? action.sectionTitle {
+                renameList(path: path, to: action.value ?? action.title)
+                message = "Renamed list \(path)."
+            }
+        case .renameItem:
+            if let path = action.targetPath ?? action.targetID {
+                renameItem(relativePath: path, to: action.value ?? action.title)
+                message = "Renamed item \(path)."
+            }
+        case .editTodo:
+            editTodo(id: action.targetID.flatMap(UUID.init(uuidString:)), matching: action.targetPath ?? action.title, newTitle: action.value ?? action.title)
+            message = "Edited todo."
+        case .editItemNote:
+            if let path = action.targetPath ?? action.targetID {
+                editItemNote(relativePath: path, note: action.value ?? action.detail ?? action.title)
+                message = "Edited item note."
+            }
+        case .markComplete:
+            let count = setAICompletion(action, completed: true)
+            message = "Marked \(count) item\(count == 1 ? "" : "s") complete."
+        case .markIncomplete:
+            let count = setAICompletion(action, completed: false)
+            message = "Marked \(count) item\(count == 1 ? "" : "s") incomplete."
+        case .favorite:
+            let count = setAIFavorite(action, favorite: true)
+            message = "Favorited \(count) item\(count == 1 ? "" : "s")."
+        case .unfavorite:
+            let count = setAIFavorite(action, favorite: false)
+            message = "Unfavorited \(count) item\(count == 1 ? "" : "s")."
+        case .selectItems:
+            let count = selectAIItems(action)
+            message = "Selected \(count) item\(count == 1 ? "" : "s")."
+        case .filterView:
+            applyAIViewFilter(action)
+            message = "Updated the current filter."
+        case .groupView:
+            if let groupOption = action.groupOption {
+                self.groupOption = groupOption
+                message = "Grouped by \(groupOption.title)."
+            }
+        case .sortView:
+            if let sortOption = action.sortOption {
+                self.sortOption = sortOption
+                message = "Sorted by \(sortOption.title)."
+            }
+        case .createMarkdownNote:
+            do {
+                try createMarkdownFile(title: action.title, sectionPath: action.sectionTitle, body: action.detail ?? action.value)
+                message = "Created Markdown note \(action.title)."
+            } catch {
+                message = error.localizedDescription
+            }
+        case .restoreRemovedItems:
+            restoreRemovedItems()
+            message = "Restored removed tracker items."
+        case .exportProgressSuggestion:
+            message = "Gemini suggested exporting progress. Use the Data menu or Settings export buttons when ready."
+        case .summarizeProgress, .recommendNextActions:
+            message = action.detail ?? action.rationale ?? action.title
+        case .resetProgress:
+            resetProgress()
+            message = "Reset tracker progress."
         }
+        return AIActionResult(
+            batchID: batchID,
+            actionID: action.id,
+            actionTitle: action.title,
+            actionType: action.actionType,
+            risk: action.risk,
+            message: message
+        )
+    }
+
+    private func appendAIMessage(_ message: AIChatMessage) {
+        guard let libraryID = selectedLibrary?.id else { return }
+        var conversation = aiConversationsByLibraryID[libraryID] ?? AIConversation(libraryID: libraryID)
+        conversation.messages.append(message)
+        if conversation.messages.count > 80 {
+            conversation.messages = Array(conversation.messages.suffix(80))
+        }
+        conversation.updatedAt = Date()
+        aiConversationsByLibraryID[libraryID] = conversation
+        save()
+    }
+
+    private func applyViewOnlyActions(from draft: AICommandDraft) {
+        let viewActions = draft.actions.filter { $0.risk == .viewOnly }
+        guard viewActions.isEmpty == false else { return }
+        let batchID = UUID()
+        viewActions.forEach { action in
+            _ = applyAIAction(action, batchID: batchID)
+        }
+    }
+
+    private func setAICompletion(_ action: AIActionDraft, completed: Bool) -> Int {
+        let targets = aiTargetItems(for: action)
+        targets.forEach { item in
+            updateProgress(for: item) { progress in
+                progress.isCompleted = completed
+                progress.completedAt = completed ? Date() : nil
+            }
+        }
+        if targets.isEmpty, action.actionType == .markComplete || action.actionType == .markIncomplete {
+            let title = action.targetPath ?? action.title
+            setTodoCompletion(matching: title, completed: completed)
+        }
+        return targets.count
+    }
+
+    private func setAIFavorite(_ action: AIActionDraft, favorite: Bool) -> Int {
+        let targets = aiTargetItems(for: action)
+        targets.forEach { item in
+            updateProgress(for: item) { progress in
+                progress.isFavorite = favorite
+            }
+        }
+        return targets.count
+    }
+
+    private func selectAIItems(_ action: AIActionDraft) -> Int {
+        let targets = aiTargetItems(for: action)
+        selectedItemIDs = Set(targets.map(\.id))
+        isBatchSelecting = selectedItemIDs.isEmpty == false
+        return selectedItemIDs.count
+    }
+
+    private func applyAIViewFilter(_ action: AIActionDraft) {
+        if let smartView = action.smartView {
+            selectedSmartView = smartView
+        }
+        if let kind = action.kind {
+            selectedKinds = [kind]
+        }
+        if let query = action.value ?? action.targetPath, query.isEmpty == false {
+            searchText = query
+        }
+    }
+
+    private func aiTargetItems(for action: AIActionDraft) -> [TrackableItem] {
+        let source = filteredItems.isEmpty ? items : filteredItems
+        if let targetPath = action.targetPath ?? action.targetID {
+            let exact = source.filter { $0.relativePath == targetPath || $0.id == targetPath }
+            if exact.isEmpty == false { return exact }
+            let fuzzy = source.filter { $0.relativePath.localizedCaseInsensitiveContains(targetPath) || $0.title.localizedCaseInsensitiveContains(targetPath) }
+            if fuzzy.isEmpty == false { return fuzzy }
+        }
+        if let kind = action.kind {
+            return source.filter { $0.kind == kind }
+        }
+        let title = action.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard title.isEmpty == false else { return selectedItems }
+        let matches = source.filter { $0.title.localizedCaseInsensitiveContains(title) || $0.relativePath.localizedCaseInsensitiveContains(title) }
+        return matches.isEmpty ? selectedItems : matches
+    }
+
+    private func aiAppContextSummary(for prompt: String) -> String {
+        let selectedSummary = selectedItems.isEmpty ? "No selected items." : "\(selectedItems.count) selected items."
+        let viewSummary = "View: \(selectedSmartView.title), group \(groupOption.title), sort \(sortOption.title), search '\(searchText)'."
+        return "\(completedCount) of \(totalCount) files complete. \(sections.count) sections. \(selectedTodos.count) todos. \(selectedSummary) \(viewSummary) \(aiKindSummary)."
+    }
+
+    private func undoSnapshot(for libraryID: UUID) -> AIUndoSnapshot {
+        AIUndoSnapshot(
+            libraries: libraries,
+            progress: progressByLibraryID[libraryID, default: [:]],
+            manualItems: manualItemsByLibraryID[libraryID, default: []],
+            manualLists: manualListsByLibraryID[libraryID, default: []],
+            todos: todosByLibraryID[libraryID, default: []],
+            hiddenItems: hiddenItemPathsByLibraryID[libraryID, default: []],
+            hiddenSections: hiddenSectionPathsByLibraryID[libraryID, default: []],
+            selectedLibraryID: selectedLibraryID,
+            searchText: searchText,
+            sortOption: sortOption,
+            groupOption: groupOption,
+            selectedSmartView: selectedSmartView,
+            selectedKinds: selectedKinds
+        )
+    }
+
+    private func restoreUndoSnapshot(_ snapshot: AIUndoSnapshot, libraryID: UUID) {
+        libraries = snapshot.libraries
+        progressByLibraryID[libraryID] = snapshot.progress
+        manualItemsByLibraryID[libraryID] = snapshot.manualItems
+        manualListsByLibraryID[libraryID] = snapshot.manualLists
+        todosByLibraryID[libraryID] = snapshot.todos
+        hiddenItemPathsByLibraryID[libraryID] = snapshot.hiddenItems
+        hiddenSectionPathsByLibraryID[libraryID] = snapshot.hiddenSections
+        selectedLibraryID = snapshot.selectedLibraryID
+        searchText = snapshot.searchText
+        sortOption = snapshot.sortOption
+        groupOption = snapshot.groupOption
+        selectedSmartView = snapshot.selectedSmartView
+        selectedKinds = snapshot.selectedKinds
     }
 
     private func aiNote(sectionPath: String) -> String {
@@ -1114,11 +1541,15 @@ private struct AppData: Codable {
     var todosByLibraryID: [UUID: [ProjectTodo]]
     var hiddenItemPathsByLibraryID: [UUID: Set<String>]
     var hiddenSectionPathsByLibraryID: [UUID: Set<String>]
+    var aiConversationsByLibraryID: [UUID: AIConversation]
+    var aiActionResultsByLibraryID: [UUID: [AIActionResult]]
+    var aiUndoSnapshotsByLibraryID: [UUID: AIUndoSnapshot]
     var selectedLibraryID: UUID?
     var includeHiddenFiles: Bool
     var markCompleteWhenOpened: Bool
     var preferredEditor: ExternalEditor
     var geminiModel: String
+    var aiControlMode: AIControlMode
 
     init(
         libraries: [Library],
@@ -1128,11 +1559,15 @@ private struct AppData: Codable {
         todosByLibraryID: [UUID: [ProjectTodo]],
         hiddenItemPathsByLibraryID: [UUID: Set<String>],
         hiddenSectionPathsByLibraryID: [UUID: Set<String>],
+        aiConversationsByLibraryID: [UUID: AIConversation],
+        aiActionResultsByLibraryID: [UUID: [AIActionResult]],
+        aiUndoSnapshotsByLibraryID: [UUID: AIUndoSnapshot],
         selectedLibraryID: UUID?,
         includeHiddenFiles: Bool,
         markCompleteWhenOpened: Bool,
         preferredEditor: ExternalEditor,
-        geminiModel: String
+        geminiModel: String,
+        aiControlMode: AIControlMode
     ) {
         self.libraries = libraries
         self.progressByLibraryID = progressByLibraryID
@@ -1141,11 +1576,15 @@ private struct AppData: Codable {
         self.todosByLibraryID = todosByLibraryID
         self.hiddenItemPathsByLibraryID = hiddenItemPathsByLibraryID
         self.hiddenSectionPathsByLibraryID = hiddenSectionPathsByLibraryID
+        self.aiConversationsByLibraryID = aiConversationsByLibraryID
+        self.aiActionResultsByLibraryID = aiActionResultsByLibraryID
+        self.aiUndoSnapshotsByLibraryID = aiUndoSnapshotsByLibraryID
         self.selectedLibraryID = selectedLibraryID
         self.includeHiddenFiles = includeHiddenFiles
         self.markCompleteWhenOpened = markCompleteWhenOpened
         self.preferredEditor = preferredEditor
         self.geminiModel = geminiModel
+        self.aiControlMode = aiControlMode
     }
 
     init(from decoder: Decoder) throws {
@@ -1157,12 +1596,32 @@ private struct AppData: Codable {
         todosByLibraryID = try container.decodeIfPresent([UUID: [ProjectTodo]].self, forKey: .todosByLibraryID) ?? [:]
         hiddenItemPathsByLibraryID = try container.decodeIfPresent([UUID: Set<String>].self, forKey: .hiddenItemPathsByLibraryID) ?? [:]
         hiddenSectionPathsByLibraryID = try container.decodeIfPresent([UUID: Set<String>].self, forKey: .hiddenSectionPathsByLibraryID) ?? [:]
+        aiConversationsByLibraryID = try container.decodeIfPresent([UUID: AIConversation].self, forKey: .aiConversationsByLibraryID) ?? [:]
+        aiActionResultsByLibraryID = try container.decodeIfPresent([UUID: [AIActionResult]].self, forKey: .aiActionResultsByLibraryID) ?? [:]
+        aiUndoSnapshotsByLibraryID = try container.decodeIfPresent([UUID: AIUndoSnapshot].self, forKey: .aiUndoSnapshotsByLibraryID) ?? [:]
         selectedLibraryID = try container.decodeIfPresent(UUID.self, forKey: .selectedLibraryID)
         includeHiddenFiles = try container.decodeIfPresent(Bool.self, forKey: .includeHiddenFiles) ?? false
         markCompleteWhenOpened = try container.decodeIfPresent(Bool.self, forKey: .markCompleteWhenOpened) ?? false
         preferredEditor = try container.decodeIfPresent(ExternalEditor.self, forKey: .preferredEditor) ?? .systemDefault
         geminiModel = try container.decodeIfPresent(String.self, forKey: .geminiModel) ?? "gemini-2.5-flash"
+        aiControlMode = try container.decodeIfPresent(AIControlMode.self, forKey: .aiControlMode) ?? .guarded
     }
+}
+
+private struct AIUndoSnapshot: Codable {
+    var libraries: [Library]
+    var progress: [String: ItemProgress]
+    var manualItems: [TrackableItem]
+    var manualLists: [String]
+    var todos: [ProjectTodo]
+    var hiddenItems: Set<String>
+    var hiddenSections: Set<String>
+    var selectedLibraryID: UUID?
+    var searchText: String
+    var sortOption: SortOption
+    var groupOption: GroupOption
+    var selectedSmartView: SmartView
+    var selectedKinds: Set<FileKind>
 }
 
 private struct ExportPayload: Codable {

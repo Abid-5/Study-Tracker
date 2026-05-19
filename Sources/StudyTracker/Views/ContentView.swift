@@ -8,7 +8,12 @@ struct ContentView: View {
             SidebarView()
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260)
         } detail: {
-            DetailView()
+            HStack(spacing: 0) {
+                DetailView()
+                Divider()
+                AIChatInspectorView()
+                    .frame(minWidth: 340, idealWidth: 380, maxWidth: 430)
+            }
         }
         .toolbar {
             ToolbarItemGroup {

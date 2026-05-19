@@ -60,6 +60,86 @@ struct AIPlanDraft: Codable, Hashable {
     var actions: [AIActionDraft]
 }
 
+enum AIControlMode: String, Codable, CaseIterable, Identifiable, Hashable {
+    case review
+    case guarded
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .review: "Review"
+        case .guarded: "Guarded Autonomy"
+        }
+    }
+}
+
+enum AIActionRisk: String, Codable, CaseIterable, Hashable {
+    case viewOnly
+    case update
+    case destructive
+
+    var title: String {
+        switch self {
+        case .viewOnly: "View"
+        case .update: "Update"
+        case .destructive: "Confirm"
+        }
+    }
+}
+
+enum AIChatRole: String, Codable, Hashable {
+    case user
+    case assistant
+    case system
+}
+
+struct AIConversation: Codable, Hashable {
+    var id: UUID = UUID()
+    var libraryID: UUID
+    var messages: [AIChatMessage] = []
+    var updatedAt: Date = Date()
+}
+
+struct AIChatMessage: Identifiable, Codable, Hashable {
+    var id: UUID = UUID()
+    var role: AIChatRole
+    var text: String
+    var createdAt: Date = Date()
+    var draft: AICommandDraft?
+}
+
+struct AICommandDraft: Identifiable, Codable, Hashable {
+    var id: UUID = UUID()
+    var assistantMessage: String
+    var warnings: [String]
+    var actions: [AIActionDraft]
+
+    enum CodingKeys: String, CodingKey {
+        case assistantMessage
+        case warnings
+        case actions
+    }
+
+    init(id: UUID = UUID(), assistantMessage: String, warnings: [String], actions: [AIActionDraft]) {
+        self.id = id
+        self.assistantMessage = assistantMessage
+        self.warnings = warnings
+        self.actions = actions
+    }
+}
+
+struct AIActionResult: Identifiable, Codable, Hashable {
+    var id: UUID = UUID()
+    var batchID: UUID
+    var actionID: UUID
+    var actionTitle: String
+    var actionType: AIActionType
+    var risk: AIActionRisk
+    var message: String
+    var createdAt: Date = Date()
+}
+
 struct AIActionDraft: Identifiable, Codable, Hashable {
     var id: UUID = UUID()
     var actionType: AIActionType
@@ -69,6 +149,17 @@ struct AIActionDraft: Identifiable, Codable, Hashable {
     var rationale: String?
     var estimatedMinutes: Int?
     var priority: AIPriority
+    var targetID: String?
+    var targetPath: String?
+    var value: String?
+    var kind: FileKind?
+    var sortOption: SortOption?
+    var groupOption: GroupOption?
+    var smartView: SmartView?
+    var completed: Bool?
+    var favorite: Bool?
+    var requiresConfirmation: Bool = false
+    var risk: AIActionRisk = .update
 
     enum CodingKeys: String, CodingKey {
         case actionType
@@ -78,6 +169,84 @@ struct AIActionDraft: Identifiable, Codable, Hashable {
         case rationale
         case estimatedMinutes
         case priority
+        case targetID
+        case targetPath
+        case value
+        case kind
+        case sortOption
+        case groupOption
+        case smartView
+        case completed
+        case favorite
+        case requiresConfirmation
+        case risk
+    }
+
+    init(
+        id: UUID = UUID(),
+        actionType: AIActionType,
+        title: String,
+        sectionTitle: String? = nil,
+        detail: String? = nil,
+        rationale: String? = nil,
+        estimatedMinutes: Int? = nil,
+        priority: AIPriority = .medium,
+        targetID: String? = nil,
+        targetPath: String? = nil,
+        value: String? = nil,
+        kind: FileKind? = nil,
+        sortOption: SortOption? = nil,
+        groupOption: GroupOption? = nil,
+        smartView: SmartView? = nil,
+        completed: Bool? = nil,
+        favorite: Bool? = nil,
+        requiresConfirmation: Bool = false,
+        risk: AIActionRisk? = nil
+    ) {
+        self.id = id
+        self.actionType = actionType
+        self.title = title
+        self.sectionTitle = sectionTitle
+        self.detail = detail
+        self.rationale = rationale
+        self.estimatedMinutes = estimatedMinutes
+        self.priority = priority
+        self.targetID = targetID
+        self.targetPath = targetPath
+        self.value = value
+        self.kind = kind
+        self.sortOption = sortOption
+        self.groupOption = groupOption
+        self.smartView = smartView
+        self.completed = completed
+        self.favorite = favorite
+        self.risk = risk ?? actionType.defaultRisk
+        self.requiresConfirmation = requiresConfirmation || self.risk == .destructive
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let actionType = try container.decode(AIActionType.self, forKey: .actionType)
+        self.init(
+            actionType: actionType,
+            title: try container.decode(String.self, forKey: .title),
+            sectionTitle: try container.decodeIfPresent(String.self, forKey: .sectionTitle),
+            detail: try container.decodeIfPresent(String.self, forKey: .detail),
+            rationale: try container.decodeIfPresent(String.self, forKey: .rationale),
+            estimatedMinutes: try container.decodeIfPresent(Int.self, forKey: .estimatedMinutes),
+            priority: try container.decodeIfPresent(AIPriority.self, forKey: .priority) ?? .medium,
+            targetID: try container.decodeIfPresent(String.self, forKey: .targetID),
+            targetPath: try container.decodeIfPresent(String.self, forKey: .targetPath),
+            value: try container.decodeIfPresent(String.self, forKey: .value),
+            kind: try container.decodeIfPresent(FileKind.self, forKey: .kind),
+            sortOption: try container.decodeIfPresent(SortOption.self, forKey: .sortOption),
+            groupOption: try container.decodeIfPresent(GroupOption.self, forKey: .groupOption),
+            smartView: try container.decodeIfPresent(SmartView.self, forKey: .smartView),
+            completed: try container.decodeIfPresent(Bool.self, forKey: .completed),
+            favorite: try container.decodeIfPresent(Bool.self, forKey: .favorite),
+            requiresConfirmation: try container.decodeIfPresent(Bool.self, forKey: .requiresConfirmation) ?? false,
+            risk: try container.decodeIfPresent(AIActionRisk.self, forKey: .risk)
+        )
     }
 }
 
@@ -86,6 +255,25 @@ enum AIActionType: String, Codable, CaseIterable, Hashable {
     case createList
     case createItem
     case createTodo
+    case renameProject
+    case renameList
+    case renameItem
+    case editTodo
+    case editItemNote
+    case markComplete
+    case markIncomplete
+    case favorite
+    case unfavorite
+    case selectItems
+    case filterView
+    case groupView
+    case sortView
+    case createMarkdownNote
+    case restoreRemovedItems
+    case exportProgressSuggestion
+    case summarizeProgress
+    case recommendNextActions
+    case resetProgress
 
     var title: String {
         switch self {
@@ -93,6 +281,25 @@ enum AIActionType: String, Codable, CaseIterable, Hashable {
         case .createList: "List"
         case .createItem: "Item"
         case .createTodo: "Todo"
+        case .renameProject: "Rename Project"
+        case .renameList: "Rename List"
+        case .renameItem: "Rename Item"
+        case .editTodo: "Edit Todo"
+        case .editItemNote: "Edit Note"
+        case .markComplete: "Mark Complete"
+        case .markIncomplete: "Mark Incomplete"
+        case .favorite: "Favorite"
+        case .unfavorite: "Unfavorite"
+        case .selectItems: "Select"
+        case .filterView: "Filter"
+        case .groupView: "Group"
+        case .sortView: "Sort"
+        case .createMarkdownNote: "Markdown"
+        case .restoreRemovedItems: "Restore"
+        case .exportProgressSuggestion: "Export"
+        case .summarizeProgress: "Summary"
+        case .recommendNextActions: "Next Actions"
+        case .resetProgress: "Reset"
         }
     }
 
@@ -102,6 +309,36 @@ enum AIActionType: String, Codable, CaseIterable, Hashable {
         case .createList: "list.bullet.rectangle"
         case .createItem: "plus.square"
         case .createTodo: "checklist"
+        case .renameProject: "pencil"
+        case .renameList: "text.badge.checkmark"
+        case .renameItem: "pencil.line"
+        case .editTodo: "checklist.checked"
+        case .editItemNote: "note.text"
+        case .markComplete: "checkmark.circle"
+        case .markIncomplete: "circle"
+        case .favorite: "star"
+        case .unfavorite: "star.slash"
+        case .selectItems: "checklist.unchecked"
+        case .filterView: "line.3.horizontal.decrease.circle"
+        case .groupView: "square.grid.2x2"
+        case .sortView: "arrow.up.arrow.down"
+        case .createMarkdownNote: "doc.badge.plus"
+        case .restoreRemovedItems: "arrow.uturn.backward"
+        case .exportProgressSuggestion: "square.and.arrow.up"
+        case .summarizeProgress: "text.quote"
+        case .recommendNextActions: "sparkles"
+        case .resetProgress: "exclamationmark.arrow.triangle.2.circlepath"
+        }
+    }
+
+    var defaultRisk: AIActionRisk {
+        switch self {
+        case .summarizeProgress, .recommendNextActions, .exportProgressSuggestion, .selectItems, .filterView, .groupView, .sortView:
+            return .viewOnly
+        case .resetProgress:
+            return .destructive
+        default:
+            return .update
         }
     }
 }
@@ -211,7 +448,7 @@ enum FileKind: String, Codable, CaseIterable, Hashable {
     }
 }
 
-enum SmartView: String, CaseIterable, Identifiable {
+enum SmartView: String, Codable, CaseIterable, Identifiable, Hashable {
     case all
     case inProgress
     case completed
@@ -241,7 +478,7 @@ enum SmartView: String, CaseIterable, Identifiable {
     }
 }
 
-enum SortOption: String, CaseIterable, Identifiable {
+enum SortOption: String, Codable, CaseIterable, Identifiable, Hashable {
     case folderOrder
     case fileName
     case fileType
@@ -267,7 +504,7 @@ enum SortOption: String, CaseIterable, Identifiable {
     }
 }
 
-enum GroupOption: String, CaseIterable, Identifiable {
+enum GroupOption: String, Codable, CaseIterable, Identifiable, Hashable {
     case folder
     case type
     case completion
