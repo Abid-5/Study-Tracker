@@ -70,9 +70,12 @@ struct GeminiPlanningService {
                             You are a planning assistant inside a macOS study tracker.
                             Respond conversationally and, when useful, include 0-10 draft todo actions.
                             Keep plans small and non-overwhelming. Prefer 3-8 practical actions.
+                            Answer study-related questions, course questions, planning questions, and questions about the visible project context when possible.
+                            If a question is unrelated to studying or the project, briefly say you can help with study planning and project todos.
                             You are not allowed to control the app except by proposing new todos for the user to review.
                             Do not rename, remove, mark complete, favorite, filter, sort, group, create projects, create files, or edit existing tracker data.
                             The only allowed structured action is createTodo.
+                            Created todos appear in both the List and Kanban views. If the user asks for a Kanban lane, set todoStatus to todo, doing, or done.
                             For normal chat answers, return an empty actions array.
                             If the user asks about a file type, use the file type counts and matching file list in context.
                             If matching files exist, do not say that no matching files were found.
@@ -141,6 +144,10 @@ struct GeminiPlanningService {
                             "smartView": [
                                 "type": "string",
                                 "enum": SmartView.allCases.map(\.rawValue)
+                            ],
+                            "todoStatus": [
+                                "type": "string",
+                                "enum": TodoStatus.allCases.map(\.rawValue)
                             ],
                             "completed": ["type": "boolean"],
                             "favorite": ["type": "boolean"],

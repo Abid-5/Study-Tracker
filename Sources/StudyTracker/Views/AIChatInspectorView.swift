@@ -77,9 +77,9 @@ struct AIChatInspectorView: View {
 
     private var emptyState: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(store.hasGeminiAPIKey ? "Ask about this project or let Gemini draft todos." : "Add your Gemini API key in Settings to enable chat.")
+            Text(store.hasGeminiAPIKey ? "Ask study questions or let Gemini draft todos." : "Add your Gemini API key in Settings to enable chat.")
                 .font(.callout.weight(.semibold))
-            Text("AI can chat about your project and propose new todos for review. It cannot change files, views, completion, projects, or lists.")
+            Text("AI can help with study plans, course questions, and project context, then propose new todos for review. It cannot change existing files, views, completion, projects, or lists.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

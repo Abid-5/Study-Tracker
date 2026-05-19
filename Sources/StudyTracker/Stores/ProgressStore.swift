@@ -31,6 +31,7 @@ final class ProgressStore: ObservableObject {
     @Published var selectedItemIDs: Set<String> = []
     @Published var todoViewMode: TodoViewMode = .list
     @Published var todoFilter: TodoFilter = .all
+    @Published private var todoRevision = 0
 
     private var progressByLibraryID: [UUID: [String: ItemProgress]] = [:]
     private var manualItemsByLibraryID: [UUID: [TrackableItem]] = [:]
@@ -41,6 +42,7 @@ final class ProgressStore: ObservableObject {
     private var aiConversationsByLibraryID: [UUID: AIConversation] = [:]
     private var aiActionResultsByLibraryID: [UUID: [AIActionResult]] = [:]
     private var aiUndoSnapshotsByLibraryID: [UUID: AIUndoSnapshot] = [:]
+    private var pendingSaveTask: Task<Void, Never>?
     private let scanner = FileScanner()
 
     var selectedLibrary: Library? {
@@ -149,6 +151,7 @@ final class ProgressStore: ObservableObject {
     }
 
     var selectedTodos: [ProjectTodo] {
+        _ = todoRevision
         guard let libraryID = selectedLibrary?.id else { return [] }
         return todosByLibraryID[libraryID, default: []].sorted { lhs, rhs in
             if lhs.status != rhs.status {
@@ -229,6 +232,8 @@ final class ProgressStore: ObservableObject {
     }
 
     func save() {
+        pendingSaveTask?.cancel()
+        pendingSaveTask = nil
         let appData = AppData(
             libraries: libraries,
             progressByLibraryID: progressByLibraryID,
@@ -686,10 +691,10 @@ final class ProgressStore: ObservableObject {
         todosByLibraryID[libraryID, default: []].append(
             ProjectTodo(id: UUID(), title: title, isCompleted: false, createdAt: Date(), completedAt: nil)
         )
-        save()
+        markTodosChanged(saveImmediately: true)
     }
 
-    func addTodo(title: String, detail: String? = nil) {
+    func addTodo(title: String, detail: String? = nil, status: TodoStatus = .todo) {
         guard let libraryID = selectedLibrary?.id else { return }
         let resolvedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard resolvedTitle.isEmpty == false else { return }
@@ -700,9 +705,9 @@ final class ProgressStore: ObservableObject {
             finalTitle = resolvedTitle
         }
         todosByLibraryID[libraryID, default: []].append(
-            ProjectTodo(id: UUID(), title: finalTitle, isCompleted: false, createdAt: Date(), completedAt: nil)
+            ProjectTodo(id: UUID(), title: finalTitle, isCompleted: status == .done, createdAt: Date(), completedAt: status == .done ? Date() : nil, status: status)
         )
-        save()
+        markTodosChanged(saveImmediately: true)
     }
 
     func toggleTodo(_ todo: ProjectTodo) {
@@ -723,7 +728,7 @@ final class ProgressStore: ObservableObject {
             updated.completedAt = updated.isCompleted ? (updated.completedAt ?? Date()) : nil
             return updated
         }
-        save()
+        markTodosChanged()
     }
 
     func editTodo(id: UUID?, matching title: String?, newTitle: String) {
@@ -738,7 +743,7 @@ final class ProgressStore: ObservableObject {
             updated.title = resolved
             return updated
         }
-        save()
+        markTodosChanged(saveImmediately: true)
     }
 
     func setTodoCompletion(matching title: String, completed: Bool) {
@@ -751,13 +756,13 @@ final class ProgressStore: ObservableObject {
             updated.completedAt = completed ? Date() : nil
             return updated
         }
-        save()
+        markTodosChanged()
     }
 
     func removeTodo(_ todo: ProjectTodo) {
         guard let libraryID = selectedLibrary?.id else { return }
         todosByLibraryID[libraryID, default: []].removeAll { $0.id == todo.id }
-        save()
+        markTodosChanged(saveImmediately: true)
     }
 
     func toggleCompletion(for item: TrackableItem) {
@@ -1281,7 +1286,7 @@ final class ProgressStore: ObservableObject {
         var message = "No matching target."
         switch action.actionType {
         case .createTodo:
-            addTodo(title: action.title, detail: action.detail)
+            addTodo(title: action.title, detail: action.detail, status: action.todoStatus ?? .todo)
             message = "Created todo \(action.title)."
         default:
             message = "Ignored unsupported AI action. AI can only create todos."
@@ -1294,6 +1299,25 @@ final class ProgressStore: ObservableObject {
             risk: action.risk,
             message: message
         )
+    }
+
+    private func markTodosChanged(saveImmediately: Bool = false) {
+        todoRevision &+= 1
+        if saveImmediately {
+            save()
+        } else {
+            scheduleSave()
+        }
+    }
+
+    private func scheduleSave() {
+        pendingSaveTask?.cancel()
+        pendingSaveTask = Task {
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard Task.isCancelled == false else { return }
+            pendingSaveTask = nil
+            save()
+        }
     }
 
     private func appendAIMessage(_ message: AIChatMessage) {

@@ -246,6 +246,7 @@ struct AIActionDraft: Identifiable, Codable, Hashable {
     var sortOption: SortOption?
     var groupOption: GroupOption?
     var smartView: SmartView?
+    var todoStatus: TodoStatus?
     var completed: Bool?
     var favorite: Bool?
     var requiresConfirmation: Bool = false
@@ -266,6 +267,7 @@ struct AIActionDraft: Identifiable, Codable, Hashable {
         case sortOption
         case groupOption
         case smartView
+        case todoStatus
         case completed
         case favorite
         case requiresConfirmation
@@ -288,6 +290,7 @@ struct AIActionDraft: Identifiable, Codable, Hashable {
         sortOption: SortOption? = nil,
         groupOption: GroupOption? = nil,
         smartView: SmartView? = nil,
+        todoStatus: TodoStatus? = nil,
         completed: Bool? = nil,
         favorite: Bool? = nil,
         requiresConfirmation: Bool = false,
@@ -308,6 +311,7 @@ struct AIActionDraft: Identifiable, Codable, Hashable {
         self.sortOption = sortOption
         self.groupOption = groupOption
         self.smartView = smartView
+        self.todoStatus = todoStatus
         self.completed = completed
         self.favorite = favorite
         self.risk = risk ?? actionType.defaultRisk
@@ -332,6 +336,7 @@ struct AIActionDraft: Identifiable, Codable, Hashable {
             sortOption: try container.decodeIfPresent(SortOption.self, forKey: .sortOption),
             groupOption: try container.decodeIfPresent(GroupOption.self, forKey: .groupOption),
             smartView: try container.decodeIfPresent(SmartView.self, forKey: .smartView),
+            todoStatus: try container.decodeIfPresent(TodoStatus.self, forKey: .todoStatus),
             completed: try container.decodeIfPresent(Bool.self, forKey: .completed),
             favorite: try container.decodeIfPresent(Bool.self, forKey: .favorite),
             requiresConfirmation: try container.decodeIfPresent(Bool.self, forKey: .requiresConfirmation) ?? false,
