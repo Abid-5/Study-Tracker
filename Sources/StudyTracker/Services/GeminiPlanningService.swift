@@ -46,14 +46,14 @@ struct GeminiPlanningService {
     private func validate(_ draft: AICommandDraft) -> AICommandDraft {
         let actions = draft.actions
             .filter { $0.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false }
+            .filter { $0.actionType == .createTodo }
             .prefix(40)
             .map { action in
                 var updated = action
+                updated.risk = .update
+                updated.requiresConfirmation = false
                 if updated.estimatedMinutes != nil {
                     updated.estimatedMinutes = min(max(updated.estimatedMinutes ?? 0, 5), 240)
-                }
-                if updated.risk == .destructive {
-                    updated.requiresConfirmation = true
                 }
                 return updated
             }
@@ -68,14 +68,12 @@ struct GeminiPlanningService {
                         [
                             "text": """
                             You are a planning assistant inside a macOS study tracker.
-                            Respond conversationally and, when useful, include 0-10 structured app actions.
+                            Respond conversationally and, when useful, include 0-10 draft todo actions.
                             Keep plans small and non-overwhelming. Prefer 3-8 practical actions.
-                            You can control tracker metadata and view state, but never delete, rename, or move files on disk.
-                            For destructive tracker changes like resetProgress, set risk to destructive and requiresConfirmation to true.
-                            For view-only answers, summaries, recommendations, selecting, filtering, grouping, and sorting, use risk viewOnly.
-                            For creating or editing projects, lists, items, todos, notes, completion, and favorites, use risk update.
-                            Use createMarkdownNote only when the user explicitly asks to create a Markdown note.
-                            Use targetPath for file/list actions when a specific file/list path is present in context.
+                            You are not allowed to control the app except by proposing new todos for the user to review.
+                            Do not rename, remove, mark complete, favorite, filter, sort, group, create projects, create files, or edit existing tracker data.
+                            The only allowed structured action is createTodo.
+                            For normal chat answers, return an empty actions array.
                             If the user asks about a file type, use the file type counts and matching file list in context.
                             If matching files exist, do not say that no matching files were found.
                             Use the user's prompt and project context.
@@ -114,7 +112,7 @@ struct GeminiPlanningService {
                         "properties": [
                             "actionType": [
                                 "type": "string",
-                                "enum": AIActionType.allCases.map(\.rawValue)
+                                "enum": [AIActionType.createTodo.rawValue]
                             ],
                             "title": ["type": "string"],
                             "sectionTitle": ["type": "string"],
@@ -147,10 +145,7 @@ struct GeminiPlanningService {
                             "completed": ["type": "boolean"],
                             "favorite": ["type": "boolean"],
                             "requiresConfirmation": ["type": "boolean"],
-                            "risk": [
-                                "type": "string",
-                                "enum": AIActionRisk.allCases.map(\.rawValue)
-                            ]
+                            "risk": ["type": "string", "enum": [AIActionRisk.update.rawValue]]
                         ],
                         "required": ["actionType", "title", "priority", "requiresConfirmation", "risk"]
                     ]

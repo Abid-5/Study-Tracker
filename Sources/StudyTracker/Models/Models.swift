@@ -52,6 +52,96 @@ struct ProjectTodo: Identifiable, Codable, Hashable {
     var isCompleted: Bool
     var createdAt: Date
     var completedAt: Date?
+    var status: TodoStatus = .todo
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case title
+        case isCompleted
+        case createdAt
+        case completedAt
+        case status
+    }
+
+    init(id: UUID, title: String, isCompleted: Bool, createdAt: Date, completedAt: Date?, status: TodoStatus? = nil) {
+        self.id = id
+        self.title = title
+        self.isCompleted = isCompleted
+        self.createdAt = createdAt
+        self.completedAt = completedAt
+        self.status = status ?? (isCompleted ? .done : .todo)
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let isCompleted = try container.decode(Bool.self, forKey: .isCompleted)
+        self.init(
+            id: try container.decode(UUID.self, forKey: .id),
+            title: try container.decode(String.self, forKey: .title),
+            isCompleted: isCompleted,
+            createdAt: try container.decode(Date.self, forKey: .createdAt),
+            completedAt: try container.decodeIfPresent(Date.self, forKey: .completedAt),
+            status: try container.decodeIfPresent(TodoStatus.self, forKey: .status)
+        )
+    }
+}
+
+enum TodoStatus: String, Codable, CaseIterable, Identifiable, Hashable {
+    case todo
+    case doing
+    case done
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .todo: "To Do"
+        case .doing: "Doing"
+        case .done: "Done"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .todo: "circle"
+        case .doing: "circle.lefthalf.filled"
+        case .done: "checkmark.circle.fill"
+        }
+    }
+}
+
+enum TodoFilter: String, Codable, CaseIterable, Identifiable, Hashable {
+    case all
+    case active
+    case todo
+    case doing
+    case done
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .all: "All"
+        case .active: "Active"
+        case .todo: "To Do"
+        case .doing: "Doing"
+        case .done: "Done"
+        }
+    }
+}
+
+enum TodoViewMode: String, Codable, CaseIterable, Identifiable, Hashable {
+    case list
+    case kanban
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .list: "List"
+        case .kanban: "Kanban"
+        }
+    }
 }
 
 struct AIPlanDraft: Codable, Hashable {

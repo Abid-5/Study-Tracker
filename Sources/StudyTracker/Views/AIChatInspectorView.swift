@@ -31,7 +31,7 @@ struct AIChatInspectorView: View {
             Label("AI Chat", systemImage: "sparkles")
                 .font(.headline)
             Spacer()
-            Text(store.aiControlMode.title)
+            Text("Chat + Todos")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Button {
@@ -77,9 +77,9 @@ struct AIChatInspectorView: View {
 
     private var emptyState: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(store.hasGeminiAPIKey ? "Ask about this project or let Gemini draft tracker actions." : "Add your Gemini API key in Settings to enable chat.")
+            Text(store.hasGeminiAPIKey ? "Ask about this project or let Gemini draft todos." : "Add your Gemini API key in Settings to enable chat.")
                 .font(.callout.weight(.semibold))
-            Text("AI can create todos, organize lists, adjust views, summarize progress, and propose guarded changes for review.")
+            Text("AI can chat about your project and propose new todos for review. It cannot change files, views, completion, projects, or lists.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -118,13 +118,6 @@ struct AIChatInspectorView: View {
                         .lineLimit(1)
                 }
                 Spacer()
-                Button {
-                    store.undoLastAIBatch()
-                } label: {
-                    Label("Undo", systemImage: "arrow.uturn.backward")
-                }
-                .disabled(store.selectedLibrary == nil)
-
                 Button {
                     Task { await store.sendAIChatMessage() }
                 } label: {
@@ -200,7 +193,7 @@ private struct AICommandDraftView: View {
                     Button("Clear") {
                         store.clearAIChatDraft()
                     }
-                    Button("Apply Selected") {
+                    Button("Add Selected") {
                         store.applySelectedAIActions()
                     }
                     .buttonStyle(.borderedProminent)

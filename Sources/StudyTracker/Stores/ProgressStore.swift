@@ -29,6 +29,8 @@ final class ProgressStore: ObservableObject {
     @Published var expandedSections: Set<String> = []
     @Published var isBatchSelecting = false
     @Published var selectedItemIDs: Set<String> = []
+    @Published var todoViewMode: TodoViewMode = .list
+    @Published var todoFilter: TodoFilter = .all
 
     private var progressByLibraryID: [UUID: [String: ItemProgress]] = [:]
     private var manualItemsByLibraryID: [UUID: [TrackableItem]] = [:]
@@ -149,10 +151,25 @@ final class ProgressStore: ObservableObject {
     var selectedTodos: [ProjectTodo] {
         guard let libraryID = selectedLibrary?.id else { return [] }
         return todosByLibraryID[libraryID, default: []].sorted { lhs, rhs in
-            if lhs.isCompleted != rhs.isCompleted {
-                return rhs.isCompleted
+            if lhs.status != rhs.status {
+                return lhs.status.sortOrder < rhs.status.sortOrder
             }
             return lhs.createdAt < rhs.createdAt
+        }
+    }
+
+    var filteredTodos: [ProjectTodo] {
+        switch todoFilter {
+        case .all:
+            return selectedTodos
+        case .active:
+            return selectedTodos.filter { $0.status != .done }
+        case .todo:
+            return selectedTodos.filter { $0.status == .todo }
+        case .doing:
+            return selectedTodos.filter { $0.status == .doing }
+        case .done:
+            return selectedTodos.filter { $0.status == .done }
         }
     }
 
@@ -205,6 +222,8 @@ final class ProgressStore: ObservableObject {
         preferredEditor = appData.preferredEditor
         geminiModel = appData.geminiModel
         aiControlMode = appData.aiControlMode
+        todoViewMode = appData.todoViewMode
+        todoFilter = appData.todoFilter
         refreshGeminiKeyStatus()
         Task { await rescanSelectedLibrary() }
     }
@@ -226,7 +245,9 @@ final class ProgressStore: ObservableObject {
             markCompleteWhenOpened: markCompleteWhenOpened,
             preferredEditor: preferredEditor,
             geminiModel: geminiModel,
-            aiControlMode: aiControlMode
+            aiControlMode: aiControlMode,
+            todoViewMode: todoViewMode,
+            todoFilter: todoFilter
         )
         try? FileManager.default.createDirectory(at: storageURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         if let data = try? JSONEncoder.studyTracker.encode(appData) {
@@ -685,12 +706,21 @@ final class ProgressStore: ObservableObject {
     }
 
     func toggleTodo(_ todo: ProjectTodo) {
+        setTodoCompletion(todo, completed: todo.status != .done)
+    }
+
+    func setTodoCompletion(_ todo: ProjectTodo, completed: Bool) {
+        setTodoStatus(todo, status: completed ? .done : .todo)
+    }
+
+    func setTodoStatus(_ todo: ProjectTodo, status: TodoStatus) {
         guard let libraryID = selectedLibrary?.id else { return }
         todosByLibraryID[libraryID] = todosByLibraryID[libraryID, default: []].map { existing in
             guard existing.id == todo.id else { return existing }
             var updated = existing
-            updated.isCompleted.toggle()
-            updated.completedAt = updated.isCompleted ? Date() : nil
+            updated.status = status
+            updated.isCompleted = status == .done
+            updated.completedAt = updated.isCompleted ? (updated.completedAt ?? Date()) : nil
             return updated
         }
         save()
@@ -717,6 +747,7 @@ final class ProgressStore: ObservableObject {
             guard existing.title.localizedCaseInsensitiveContains(title) else { return existing }
             var updated = existing
             updated.isCompleted = completed
+            updated.status = completed ? .done : .todo
             updated.completedAt = completed ? Date() : nil
             return updated
         }
@@ -916,16 +947,17 @@ final class ProgressStore: ObservableObject {
                 todos: selectedTodos
             )
             let draft = try await GeminiChatService(apiKey: apiKey, model: geminiModel).send(prompt: prompt, context: context)
-            activeAICommandDraft = draft
-            aiDraft = AIPlanDraft(summary: draft.assistantMessage, warnings: draft.warnings, actions: draft.actions)
-            selectedAIActionIDs = Set(draft.actions.filter { $0.risk == .update }.map(\.id))
-            appendAIMessage(AIChatMessage(role: .assistant, text: draft.assistantMessage, draft: draft))
-
-            if aiControlMode == .guarded {
-                applyViewOnlyActions(from: draft)
-            }
+            let safeDraft = AICommandDraft(
+                assistantMessage: draft.assistantMessage,
+                warnings: draft.warnings,
+                actions: draft.actions.filter { $0.actionType == .createTodo }
+            )
+            activeAICommandDraft = safeDraft
+            aiDraft = AIPlanDraft(summary: safeDraft.assistantMessage, warnings: safeDraft.warnings, actions: safeDraft.actions)
+            selectedAIActionIDs = Set(safeDraft.actions.map(\.id))
+            appendAIMessage(AIChatMessage(role: .assistant, text: safeDraft.assistantMessage, draft: safeDraft))
             save()
-            aiStatusMessage = draft.actions.isEmpty ? "Gemini replied." : "Review Gemini's actions before applying them."
+            aiStatusMessage = safeDraft.actions.isEmpty ? "Gemini replied." : "Review Gemini's todo drafts before adding them."
         } catch {
             appendAIMessage(AIChatMessage(role: .system, text: error.localizedDescription))
             aiStatusMessage = error.localizedDescription
@@ -961,19 +993,8 @@ final class ProgressStore: ObservableObject {
 
     func applySelectedAIActions() {
         let actions = activeAICommandDraft?.actions ?? aiDraft?.actions ?? []
-        let selectedActions = actions.filter { selectedAIActionIDs.contains($0.id) }
+        let selectedActions = actions.filter { selectedAIActionIDs.contains($0.id) && $0.actionType == .createTodo }
         guard selectedActions.isEmpty == false, let libraryID = selectedLibrary?.id else { return }
-
-        let destructiveActions = selectedActions.filter { $0.risk == .destructive || $0.requiresConfirmation }
-        if destructiveActions.isEmpty == false {
-            let alert = NSAlert()
-            alert.messageText = "Apply \(destructiveActions.count) confirmed AI action\(destructiveActions.count == 1 ? "" : "s")?"
-            alert.informativeText = "These actions can reset, restore, or otherwise significantly change tracker state. Files on disk are not deleted or renamed."
-            alert.alertStyle = .critical
-            alert.addButton(withTitle: "Apply")
-            alert.addButton(withTitle: "Cancel")
-            guard alert.runModal() == .alertFirstButtonReturn else { return }
-        }
 
         let batchID = UUID()
         aiUndoSnapshotsByLibraryID[libraryID] = undoSnapshot(for: libraryID)
@@ -981,8 +1002,8 @@ final class ProgressStore: ObservableObject {
             applyAIAction(action, batchID: batchID)
         }
         aiActionResultsByLibraryID[libraryID, default: []].append(contentsOf: results)
-        aiStatusMessage = "Applied \(selectedActions.count) selected AI actions."
-        appendAIMessage(AIChatMessage(role: .system, text: "Applied \(selectedActions.count) selected AI action\(selectedActions.count == 1 ? "" : "s")."))
+        aiStatusMessage = "Added \(selectedActions.count) selected AI todo\(selectedActions.count == 1 ? "" : "s")."
+        appendAIMessage(AIChatMessage(role: .system, text: "Added \(selectedActions.count) selected AI todo\(selectedActions.count == 1 ? "" : "s")."))
         activeAICommandDraft = nil
         aiDraft = nil
         selectedAIActionIDs.removeAll()
@@ -1259,96 +1280,11 @@ final class ProgressStore: ObservableObject {
     private func applyAIAction(_ action: AIActionDraft, batchID: UUID) -> AIActionResult {
         var message = "No matching target."
         switch action.actionType {
-        case .createProject:
-            let library = Library(
-                id: UUID(),
-                name: action.title,
-                rootPath: "",
-                bookmarkData: nil,
-                createdAt: Date(),
-                lastOpenedAt: Date(),
-                scanSettings: ScanSettings(includeHiddenFiles: includeHiddenFiles)
-            )
-            libraries.insert(library, at: 0)
-            selectedLibraryID = library.id
-            items = []
-            save()
-            message = "Created project \(action.title)."
-        case .createList:
-            addList(named: action.title)
-            message = "Created list \(action.title)."
-        case .createItem:
-            addItem(title: action.title, sectionPath: action.sectionTitle)
-            message = "Created item \(action.title)."
         case .createTodo:
             addTodo(title: action.title, detail: action.detail)
             message = "Created todo \(action.title)."
-        case .renameProject:
-            renameSelectedProject(to: action.value ?? action.title)
-            message = "Renamed project."
-        case .renameList:
-            if let path = action.targetPath ?? action.sectionTitle {
-                renameList(path: path, to: action.value ?? action.title)
-                message = "Renamed list \(path)."
-            }
-        case .renameItem:
-            if let path = action.targetPath ?? action.targetID {
-                renameItem(relativePath: path, to: action.value ?? action.title)
-                message = "Renamed item \(path)."
-            }
-        case .editTodo:
-            editTodo(id: action.targetID.flatMap(UUID.init(uuidString:)), matching: action.targetPath ?? action.title, newTitle: action.value ?? action.title)
-            message = "Edited todo."
-        case .editItemNote:
-            if let path = action.targetPath ?? action.targetID {
-                editItemNote(relativePath: path, note: action.value ?? action.detail ?? action.title)
-                message = "Edited item note."
-            }
-        case .markComplete:
-            let count = setAICompletion(action, completed: true)
-            message = "Marked \(count) item\(count == 1 ? "" : "s") complete."
-        case .markIncomplete:
-            let count = setAICompletion(action, completed: false)
-            message = "Marked \(count) item\(count == 1 ? "" : "s") incomplete."
-        case .favorite:
-            let count = setAIFavorite(action, favorite: true)
-            message = "Favorited \(count) item\(count == 1 ? "" : "s")."
-        case .unfavorite:
-            let count = setAIFavorite(action, favorite: false)
-            message = "Unfavorited \(count) item\(count == 1 ? "" : "s")."
-        case .selectItems:
-            let count = selectAIItems(action)
-            message = "Selected \(count) item\(count == 1 ? "" : "s")."
-        case .filterView:
-            applyAIViewFilter(action)
-            message = "Updated the current filter."
-        case .groupView:
-            if let groupOption = action.groupOption {
-                self.groupOption = groupOption
-                message = "Grouped by \(groupOption.title)."
-            }
-        case .sortView:
-            if let sortOption = action.sortOption {
-                self.sortOption = sortOption
-                message = "Sorted by \(sortOption.title)."
-            }
-        case .createMarkdownNote:
-            do {
-                try createMarkdownFile(title: action.title, sectionPath: action.sectionTitle, body: action.detail ?? action.value)
-                message = "Created Markdown note \(action.title)."
-            } catch {
-                message = error.localizedDescription
-            }
-        case .restoreRemovedItems:
-            restoreRemovedItems()
-            message = "Restored removed tracker items."
-        case .exportProgressSuggestion:
-            message = "Gemini suggested exporting progress. Use the Data menu or Settings export buttons when ready."
-        case .summarizeProgress, .recommendNextActions:
-            message = action.detail ?? action.rationale ?? action.title
-        case .resetProgress:
-            resetProgress()
-            message = "Reset tracker progress."
+        default:
+            message = "Ignored unsupported AI action. AI can only create todos."
         }
         return AIActionResult(
             batchID: batchID,
@@ -1550,6 +1486,8 @@ private struct AppData: Codable {
     var preferredEditor: ExternalEditor
     var geminiModel: String
     var aiControlMode: AIControlMode
+    var todoViewMode: TodoViewMode
+    var todoFilter: TodoFilter
 
     init(
         libraries: [Library],
@@ -1567,7 +1505,9 @@ private struct AppData: Codable {
         markCompleteWhenOpened: Bool,
         preferredEditor: ExternalEditor,
         geminiModel: String,
-        aiControlMode: AIControlMode
+        aiControlMode: AIControlMode,
+        todoViewMode: TodoViewMode,
+        todoFilter: TodoFilter
     ) {
         self.libraries = libraries
         self.progressByLibraryID = progressByLibraryID
@@ -1585,6 +1525,8 @@ private struct AppData: Codable {
         self.preferredEditor = preferredEditor
         self.geminiModel = geminiModel
         self.aiControlMode = aiControlMode
+        self.todoViewMode = todoViewMode
+        self.todoFilter = todoFilter
     }
 
     init(from decoder: Decoder) throws {
@@ -1605,6 +1547,8 @@ private struct AppData: Codable {
         preferredEditor = try container.decodeIfPresent(ExternalEditor.self, forKey: .preferredEditor) ?? .systemDefault
         geminiModel = try container.decodeIfPresent(String.self, forKey: .geminiModel) ?? "gemini-2.5-flash"
         aiControlMode = try container.decodeIfPresent(AIControlMode.self, forKey: .aiControlMode) ?? .guarded
+        todoViewMode = try container.decodeIfPresent(TodoViewMode.self, forKey: .todoViewMode) ?? .list
+        todoFilter = try container.decodeIfPresent(TodoFilter.self, forKey: .todoFilter) ?? .all
     }
 }
 
@@ -1622,6 +1566,16 @@ private struct AIUndoSnapshot: Codable {
     var groupOption: GroupOption
     var selectedSmartView: SmartView
     var selectedKinds: Set<FileKind>
+}
+
+private extension TodoStatus {
+    var sortOrder: Int {
+        switch self {
+        case .todo: 0
+        case .doing: 1
+        case .done: 2
+        }
+    }
 }
 
 private struct ExportPayload: Codable {
