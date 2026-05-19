@@ -54,6 +54,68 @@ struct ProjectTodo: Identifiable, Codable, Hashable {
     var completedAt: Date?
 }
 
+struct AIPlanDraft: Codable, Hashable {
+    var summary: String
+    var warnings: [String]
+    var actions: [AIActionDraft]
+}
+
+struct AIActionDraft: Identifiable, Codable, Hashable {
+    var id: UUID = UUID()
+    var actionType: AIActionType
+    var title: String
+    var sectionTitle: String?
+    var detail: String?
+    var rationale: String?
+    var estimatedMinutes: Int?
+    var priority: AIPriority
+
+    enum CodingKeys: String, CodingKey {
+        case actionType
+        case title
+        case sectionTitle
+        case detail
+        case rationale
+        case estimatedMinutes
+        case priority
+    }
+}
+
+enum AIActionType: String, Codable, CaseIterable, Hashable {
+    case createProject
+    case createList
+    case createItem
+    case createTodo
+
+    var title: String {
+        switch self {
+        case .createProject: "Project"
+        case .createList: "List"
+        case .createItem: "Item"
+        case .createTodo: "Todo"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .createProject: "folder.badge.plus"
+        case .createList: "list.bullet.rectangle"
+        case .createItem: "plus.square"
+        case .createTodo: "checklist"
+        }
+    }
+}
+
+enum AIPriority: String, Codable, CaseIterable, Hashable {
+    case low
+    case medium
+    case high
+
+    var title: String {
+        rawValue.capitalized
+    }
+}
+
 struct StudySection: Identifiable, Hashable {
     var id: String { path }
     var title: String

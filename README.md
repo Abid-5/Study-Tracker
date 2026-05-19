@@ -14,6 +14,8 @@ Study Tracker is a native macOS SwiftUI app for turning a folder of course files
 - Project todo list with complete/reopen/remove actions.
 - Batch selection with complete, incomplete, favorite, unfavorite, and remove actions.
 - Markdown note creation with editor preference for System Default, VS Code, or Zed.
+- Optional Gemini planning assistant using your own API key stored in macOS Keychain.
+- AI-generated draft plans that can create projects, lists, items, and todos only after review.
 - JSON/CSV progress export.
 - Local release DMG packaging with an app icon.
 
@@ -60,6 +62,18 @@ The DMG build script:
 ## Distribution Notes
 
 The default DMG is suitable for local sharing/testing. For public distribution, sign with a Developer ID certificate and notarize with Apple.
+
+## Gemini Assistant
+
+Study Tracker can use a user-provided Gemini API key to draft study plans from the current project, scanned files, and todos. The key is stored in macOS Keychain. AI output is shown as a reviewable draft; selected actions are applied only when you choose `Apply Selected`.
+
+The assistant can draft:
+
+- project breakdowns,
+- section/list ideas,
+- project todos,
+- small manual tracker items,
+- non-overwhelming next-action plans.
 
 ## Data Storage
 

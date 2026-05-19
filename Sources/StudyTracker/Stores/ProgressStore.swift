@@ -15,6 +15,13 @@ final class ProgressStore: ObservableObject {
     @Published var includeHiddenFiles = false
     @Published var markCompleteWhenOpened = false
     @Published var preferredEditor: ExternalEditor = .systemDefault
+    @Published var geminiModel = "gemini-2.5-flash"
+    @Published var hasGeminiAPIKey = false
+    @Published var isGeneratingAIPlan = false
+    @Published var aiPrompt = ""
+    @Published var aiDraft: AIPlanDraft?
+    @Published var selectedAIActionIDs: Set<UUID> = []
+    @Published var aiStatusMessage: String?
     @Published var isScanning = false
     @Published var expandedSections: Set<String> = []
     @Published var isBatchSelecting = false
@@ -176,6 +183,8 @@ final class ProgressStore: ObservableObject {
         includeHiddenFiles = appData.includeHiddenFiles
         markCompleteWhenOpened = appData.markCompleteWhenOpened
         preferredEditor = appData.preferredEditor
+        geminiModel = appData.geminiModel
+        refreshGeminiKeyStatus()
         Task { await rescanSelectedLibrary() }
     }
 
@@ -191,7 +200,8 @@ final class ProgressStore: ObservableObject {
             selectedLibraryID: selectedLibraryID,
             includeHiddenFiles: includeHiddenFiles,
             markCompleteWhenOpened: markCompleteWhenOpened,
-            preferredEditor: preferredEditor
+            preferredEditor: preferredEditor,
+            geminiModel: geminiModel
         )
         try? FileManager.default.createDirectory(at: storageURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         if let data = try? JSONEncoder.studyTracker.encode(appData) {
@@ -336,6 +346,16 @@ final class ProgressStore: ObservableObject {
         Task { await rescanSelectedLibrary() }
     }
 
+    func addList(named name: String) {
+        guard let libraryID = selectedLibrary?.id else { return }
+        let path = uniqueSectionPath(from: name, libraryID: libraryID)
+        manualListsByLibraryID[libraryID, default: []].append(path)
+        hiddenSectionPathsByLibraryID[libraryID, default: []].remove(path)
+        expandedSections.insert(path)
+        save()
+        Task { await rescanSelectedLibrary() }
+    }
+
     func removeList(_ section: StudySection) {
         guard let libraryID = selectedLibrary?.id else { return }
         let alert = NSAlert()
@@ -385,6 +405,37 @@ final class ProgressStore: ObservableObject {
         manualItemsByLibraryID[library.id, default: []].append(item)
         hiddenItemPathsByLibraryID[library.id, default: []].remove(relativePath)
         expandedSections.insert(sectionPath)
+        save()
+        Task { await rescanSelectedLibrary() }
+    }
+
+    func addItem(title: String, sectionPath: String?) {
+        guard let library = selectedLibrary else { return }
+        let resolvedSectionPath = sectionPath?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            ? sectionPath!.trimmingCharacters(in: .whitespacesAndNewlines)
+            : defaultManualSectionPath(for: library.id)
+        if manualListsByLibraryID[library.id, default: []].contains(resolvedSectionPath) == false {
+            manualListsByLibraryID[library.id, default: []].append(resolvedSectionPath)
+        }
+        let relativePath = uniqueItemPath(title: title, sectionPath: resolvedSectionPath, libraryID: library.id)
+        let item = TrackableItem(
+            libraryID: library.id,
+            title: title,
+            relativePath: relativePath,
+            absolutePath: "",
+            fileExtension: "",
+            kind: .other,
+            byteSize: 0,
+            durationSeconds: nil,
+            pageCount: nil,
+            wordCount: nil,
+            dateAdded: Date(),
+            modifiedAt: nil,
+            progress: ItemProgress(note: aiNote(sectionPath: resolvedSectionPath))
+        )
+        manualItemsByLibraryID[library.id, default: []].append(item)
+        hiddenItemPathsByLibraryID[library.id, default: []].remove(relativePath)
+        expandedSections.insert(resolvedSectionPath)
         save()
         Task { await rescanSelectedLibrary() }
     }
@@ -511,6 +562,22 @@ final class ProgressStore: ObservableObject {
         save()
     }
 
+    func addTodo(title: String, detail: String? = nil) {
+        guard let libraryID = selectedLibrary?.id else { return }
+        let resolvedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard resolvedTitle.isEmpty == false else { return }
+        let finalTitle: String
+        if let detail, detail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            finalTitle = "\(resolvedTitle) - \(detail.trimmingCharacters(in: .whitespacesAndNewlines))"
+        } else {
+            finalTitle = resolvedTitle
+        }
+        todosByLibraryID[libraryID, default: []].append(
+            ProjectTodo(id: UUID(), title: finalTitle, isCompleted: false, createdAt: Date(), completedAt: nil)
+        )
+        save()
+    }
+
     func toggleTodo(_ todo: ProjectTodo) {
         guard let libraryID = selectedLibrary?.id else { return }
         todosByLibraryID[libraryID] = todosByLibraryID[libraryID, default: []].map { existing in
@@ -624,6 +691,89 @@ final class ProgressStore: ObservableObject {
     func revealItemInFinder(_ item: TrackableItem) {
         guard item.absolutePath.isEmpty == false else { return }
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: item.absolutePath)])
+    }
+
+    func saveGeminiAPIKey(_ key: String) {
+        do {
+            try KeychainService.saveGeminiAPIKey(key)
+            refreshGeminiKeyStatus()
+            aiStatusMessage = "Gemini API key saved."
+        } catch {
+            aiStatusMessage = error.localizedDescription
+        }
+    }
+
+    func removeGeminiAPIKey() {
+        do {
+            try KeychainService.deleteGeminiAPIKey()
+            refreshGeminiKeyStatus()
+            aiStatusMessage = "Gemini API key removed."
+        } catch {
+            aiStatusMessage = error.localizedDescription
+        }
+    }
+
+    func refreshGeminiKeyStatus() {
+        hasGeminiAPIKey = ((try? KeychainService.geminiAPIKey()) ?? nil)?.isEmpty == false
+    }
+
+    func testGeminiConnection() async {
+        do {
+            guard let apiKey = try KeychainService.geminiAPIKey(), apiKey.isEmpty == false else {
+                aiStatusMessage = "Add a Gemini API key first."
+                return
+            }
+            try await GeminiPlanningService(apiKey: apiKey, model: geminiModel).testConnection()
+            aiStatusMessage = "Gemini connection works."
+        } catch {
+            aiStatusMessage = error.localizedDescription
+        }
+    }
+
+    func generateAIPlan() async {
+        guard let library = selectedLibrary else { return }
+        let prompt = aiPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard prompt.isEmpty == false else {
+            aiStatusMessage = "Describe what you want Gemini to plan."
+            return
+        }
+        do {
+            guard let apiKey = try KeychainService.geminiAPIKey(), apiKey.isEmpty == false else {
+                aiStatusMessage = "Add a Gemini API key in Settings first."
+                return
+            }
+            isGeneratingAIPlan = true
+            defer { isGeneratingAIPlan = false }
+            let context = AIPlanningContext(
+                projectName: library.name,
+                projectSummary: "\(completedCount) of \(totalCount) files complete. \(sections.count) sections. \(selectedTodos.count) todos.",
+                files: filteredItems.isEmpty ? items : filteredItems,
+                todos: selectedTodos
+            )
+            let draft = try await GeminiPlanningService(apiKey: apiKey, model: geminiModel).generatePlan(prompt: prompt, context: context)
+            aiDraft = draft
+            selectedAIActionIDs = Set(draft.actions.map(\.id))
+            aiStatusMessage = "Review Gemini's draft before applying it."
+        } catch {
+            aiStatusMessage = error.localizedDescription
+        }
+    }
+
+    func toggleAIActionSelection(_ action: AIActionDraft) {
+        if selectedAIActionIDs.contains(action.id) {
+            selectedAIActionIDs.remove(action.id)
+        } else {
+            selectedAIActionIDs.insert(action.id)
+        }
+    }
+
+    func applySelectedAIActions() {
+        guard let draft = aiDraft else { return }
+        let selectedActions = draft.actions.filter { selectedAIActionIDs.contains($0.id) }
+        selectedActions.forEach(applyAIAction)
+        aiStatusMessage = "Applied \(selectedActions.count) selected AI actions."
+        aiDraft = nil
+        selectedAIActionIDs.removeAll()
     }
 
     private func updateProgress(for item: TrackableItem, mutate: (inout ItemProgress) -> Void) {
@@ -879,6 +1029,35 @@ final class ProgressStore: ObservableObject {
         value.replacingOccurrences(of: "/", with: "-").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private func applyAIAction(_ action: AIActionDraft) {
+        switch action.actionType {
+        case .createProject:
+            let library = Library(
+                id: UUID(),
+                name: action.title,
+                rootPath: "",
+                bookmarkData: nil,
+                createdAt: Date(),
+                lastOpenedAt: Date(),
+                scanSettings: ScanSettings(includeHiddenFiles: includeHiddenFiles)
+            )
+            libraries.insert(library, at: 0)
+            selectedLibraryID = library.id
+            items = []
+            save()
+        case .createList:
+            addList(named: action.title)
+        case .createItem:
+            addItem(title: action.title, sectionPath: action.sectionTitle)
+        case .createTodo:
+            addTodo(title: action.title, detail: action.detail)
+        }
+    }
+
+    private func aiNote(sectionPath: String) -> String {
+        "AI-created item in \(sectionPath)."
+    }
+
     private var storageURL: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory())
@@ -898,6 +1077,7 @@ private struct AppData: Codable {
     var includeHiddenFiles: Bool
     var markCompleteWhenOpened: Bool
     var preferredEditor: ExternalEditor
+    var geminiModel: String
 
     init(
         libraries: [Library],
@@ -910,7 +1090,8 @@ private struct AppData: Codable {
         selectedLibraryID: UUID?,
         includeHiddenFiles: Bool,
         markCompleteWhenOpened: Bool,
-        preferredEditor: ExternalEditor
+        preferredEditor: ExternalEditor,
+        geminiModel: String
     ) {
         self.libraries = libraries
         self.progressByLibraryID = progressByLibraryID
@@ -923,6 +1104,7 @@ private struct AppData: Codable {
         self.includeHiddenFiles = includeHiddenFiles
         self.markCompleteWhenOpened = markCompleteWhenOpened
         self.preferredEditor = preferredEditor
+        self.geminiModel = geminiModel
     }
 
     init(from decoder: Decoder) throws {
@@ -938,6 +1120,7 @@ private struct AppData: Codable {
         includeHiddenFiles = try container.decodeIfPresent(Bool.self, forKey: .includeHiddenFiles) ?? false
         markCompleteWhenOpened = try container.decodeIfPresent(Bool.self, forKey: .markCompleteWhenOpened) ?? false
         preferredEditor = try container.decodeIfPresent(ExternalEditor.self, forKey: .preferredEditor) ?? .systemDefault
+        geminiModel = try container.decodeIfPresent(String.self, forKey: .geminiModel) ?? "gemini-2.5-flash"
     }
 }
 
